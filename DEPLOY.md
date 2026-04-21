@@ -1,4 +1,4 @@
-# 🦷 رواسي لطب الأسنان — دليل النشر v2 (محدّث)
+# 🦷 رواسي لطب الأسنان — دليل النشر على Vercel + Neon
 
 ---
 
@@ -42,16 +42,10 @@
 
 أضف هذه المتغيرات:
 
-| الاسم | القيمة | ملاحظات |
-|-------|--------|----------|
-| `DATABASE_URL` | الرابط من Neon (postgresql://...) | **مطلوب** |
-| `JWT_SECRET` | أي نص عشوائي طويل مثل: `rawasi-2025-super-secret-xyz` | **مطلوب** |
-| `ALLOWED_ORIGINS` | `https://rawasi-clinic.vercel.app` | **مطلوب للحماية** — غيّره لرابط موقعك النهائي |
-
-**مهم جداً:** 
-- بعد نشر الموقع، غيّر `ALLOWED_ORIGINS` لرابط الموقع الحقيقي (مثال: `https://rawasi.vercel.app`)
-- إذا عندك أكثر من domain، افصلهم بفاصلة: `https://site1.com,https://site2.com`
-- بدون هذا المتغير، أي موقع يقدر يستخدم API حقك
+| الاسم | القيمة |
+|-------|--------|
+| `DATABASE_URL` | الرابط من Neon (postgresql://...) |
+| `JWT_SECRET` | أي نص عشوائي طويل مثل: `rawasi-2025-super-secret-xyz` |
 
 > **ملاحظة**: لا تحتاج `SMTP` أو `GOOGLE` الآن — واتساب يعمل بدونها
 
@@ -66,11 +60,6 @@
 https://rawasi-clinic.vercel.app
 ```
 
-**بعد النشر مباشرة:**
-1. ارجع للخطوة ٣
-2. عدّل `ALLOWED_ORIGINS` لرابط موقعك الحقيقي
-3. أعد النشر (Redeploy) في Vercel
-
 ---
 
 ### الخطوة ٥ — تهيئة قاعدة البيانات تلقائياً
@@ -82,8 +71,8 @@ https://rawasi-clinic.vercel.app
 
 **بيانات الدخول الأولى:**
 ```
-اسم المستخدم: rexlmk
-كلمة المرور: mhmd@123
+البريد:    admin@rawasi.iq
+كلمة المرور: admin123
 ```
 
 > **مهم**: غيّر كلمة المرور بعد أول دخول!
@@ -99,35 +88,6 @@ https://rawasi-clinic.vercel.app
 
 ---
 
-## 🆕 ميزات جديدة في v2
-
-### 1. 📆 توفر الأطباء اليومي
-- كل طبيب يدخل على "ملفي الطبي" ← يشوف تقويم الشهر
-- يضغط على أي يوم يغير حالته (متوفر 🟢 / غير متوفر 🔴)
-- لما الدكتور يكون غير متوفر:
-  - المراجع يشوف تحذير بس يقدر يكمل الحجز
-  - موظف الاستقبال يتواصل معاه للتأكيد
-
-### 2. 🔒 حماية عالية المستوى
-**Security headers:**
-- `Helmet` كامل: CSP, HSTS, X-Frame-Options, Referrer-Policy
-- الموقع محمي من XSS, Clickjacking, MIME sniffing
-
-**Rate limiting:**
-- تسجيل الدخول: 20 محاولة كل 15 دقيقة
-- API عامة: 120 طلب بالدقيقة
-- حماية من DDoS و brute-force
-
-**CORS محدود:**
-- فقط الـ domains المصرحة بـ `ALLOWED_ORIGINS` تقدر تستخدم API
-- منع CSRF attacks
-
-**Input sanitization:**
-- تنظيف تلقائي لجميع المدخلات
-- منع SQL injection و XSS
-
----
-
 ## 🔧 حل المشاكل الشائعة
 
 ### ❌ خطأ "الاتصال بقاعدة البيانات فشل"
@@ -139,11 +99,6 @@ https://rawasi-clinic.vercel.app
 - تأكد من وجود `JWT_SECRET` في متغيرات Vercel
 - امسح الـ cookies وأعد المحاولة
 
-### ❌ خطأ "Not allowed by CORS"
-- تأكد أن `ALLOWED_ORIGINS` يحتوي رابط الموقع الحقيقي
-- لو موقعك `https://rawasi.vercel.app` لازم يكون بالضبط نفس الرابط
-- بعد التعديل أعد النشر (Redeploy)
-
 ### ❌ الموقع يفتح لكن API لا يعمل
 - تحقق من Vercel → Functions log لمعرفة الخطأ الحقيقي
 - تأكد أن `vercel.json` موجود في المجلد الرئيسي
@@ -152,20 +107,13 @@ https://rawasi-clinic.vercel.app
 - المتصفح قد يمنع النوافذ المنبثقة — اسمح بها أو
 - استخدم زر 📱 في شاشة تفاصيل الموعد
 
-### ❌ "Too many requests"
-- Rate limiter شغال — انتظر دقيقة وأعد المحاولة
-- إذا كنت تختبر كثير، زد الحد في `server.js`:
-  ```js
-  const apiLimiter = rateLimit({ windowMs: 60_000, max: 300 }); // بدل 120
-  ```
-
 ---
 
 ## 📁 هيكل الملفات
 
 ```
 rawasi-clinic/
-├── server.js      ← Backend API + Security
+├── server.js      ← Backend API الكامل
 ├── index.html     ← لوحة التحكم (Frontend)
 ├── package.json   ← dependencies
 ├── vercel.json    ← إعدادات Vercel
@@ -180,17 +128,7 @@ rawasi-clinic/
 |-------|----------------|
 | `admin` | كل شيء بما فيه إدارة المستخدمين والتقارير |
 | `receptionist` | حجز المواعيد، إدارتها، عرض المرضى |
-| `doctor` | يرى مواعيده فقط + يحدد توفره اليومي |
-
----
-
-## 🛡️ ملاحظات أمنية
-
-1. **لا تشارك** `JWT_SECRET` أو `DATABASE_URL` مع أحد
-2. **غيّر كلمة المرور** الافتراضية فوراً
-3. **فعّل 2FA** على حساب Vercel و Neon
-4. **راجع Logs** بانتظام في Vercel → Functions
-5. **حدّث Dependencies** شهرياً: `npm update`
+| `doctor` | يرى مواعيده فقط |
 
 ---
 

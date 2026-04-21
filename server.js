@@ -1,106 +1,22 @@
 /*
-  🦷 رواسي لطب الأسنان — النسخة الكاملة v5
+  🦷 رواسي لطب الأسنان — النسخة الكاملة v4
   Vercel + Neon + Cloudinary
   Admin: rexlmk / mhmd@123
 */
-const express    = require('express');
-const cors       = require('cors');
-const helmet     = require('helmet');
-const bcrypt     = require('bcryptjs');
-const jwt        = require('jsonwebtoken');
-const { Pool }   = require('pg');
+const express = require('express');
+const cors    = require('cors');
+const helmet  = require('helmet');
+const bcrypt  = require('bcryptjs');
+const jwt     = require('jsonwebtoken');
+const { Pool }= require('pg');
 require('dotenv').config();
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
-// ══════════════════════════════════════════════════════════
-//  SECURITY — Helmet (headers hardened)
-// ══════════════════════════════════════════════════════════
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc:     ["'self'"],
-      scriptSrc:      ["'self'", "'unsafe-inline'", "https://upload.cloudinary.com"],
-      styleSrc:       ["'self'", "'unsafe-inline'"],
-      imgSrc:         ["'self'", "data:", "https://res.cloudinary.com"],
-      connectSrc:     ["'self'", "https://api.cloudinary.com", "https://wa.me"],
-      frameSrc:       ["'none'"],
-      objectSrc:      ["'none'"],
-      upgradeInsecureRequests: [],
-    },
-  },
-  hsts:                   { maxAge: 31536000, includeSubDomains: true, preload: true },
-  referrerPolicy:         { policy: 'strict-origin-when-cross-origin' },
-  permissionsPolicy:      false,
-  crossOriginEmbedderPolicy: false,
-}));
-
-// ══════════════════════════════════════════════════════════
-//  CORS — restrict to known origins only
-// ══════════════════════════════════════════════════════════
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
-
-app.use(cors({
-  origin: (origin, cb) => {
-    // Allow server-to-server (no origin) and listed origins
-    if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
-      return cb(null, true);
-    }
-    cb(new Error('Not allowed by CORS'));
-  },
-  methods:          ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders:   ['Content-Type', 'Authorization'],
-  credentials:      true,
-  maxAge:           600,
-}));
-
-// ══════════════════════════════════════════════════════════
-//  RATE LIMITER (in-memory, Vercel-safe)
-// ══════════════════════════════════════════════════════════
-const rateLimitStore = new Map();
-function rateLimit({ windowMs = 60_000, max = 60, message = 'Too many requests' } = {}) {
-  return (req, res, next) => {
-    const key  = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.ip || 'unknown';
-    const now  = Date.now();
-    const rec  = rateLimitStore.get(key) || { count: 0, resetAt: now + windowMs };
-    if (now > rec.resetAt) { rec.count = 0; rec.resetAt = now + windowMs; }
-    rec.count++;
-    rateLimitStore.set(key, rec);
-    res.setHeader('X-RateLimit-Limit',     max);
-    res.setHeader('X-RateLimit-Remaining', Math.max(0, max - rec.count));
-    if (rec.count > max) return res.status(429).json({ error: message });
-    next();
-  };
-}
-// Strict limiter for auth endpoints
-const authLimiter = rateLimit({ windowMs: 15 * 60_000, max: 20, message: 'محاولات كثيرة، انتظر 15 دقيقة' });
-// General API limiter
-const apiLimiter  = rateLimit({ windowMs: 60_000, max: 120 });
-
-app.use('/api/', apiLimiter);
-
-// ══════════════════════════════════════════════════════════
-//  BODY PARSER — tight limits
-// ══════════════════════════════════════════════════════════
-app.use(express.json({ limit: '2mb' }));
-
-// ══════════════════════════════════════════════════════════
-//  INPUT SANITIZER — strip NUL bytes & trim strings
-// ══════════════════════════════════════════════════════════
-function sanitize(obj) {
-  if (!obj || typeof obj !== 'object') return obj;
-  for (const k of Object.keys(obj)) {
-    if (typeof obj[k] === 'string') {
-      obj[k] = obj[k].replace(/\0/g, '').trim().substring(0, 2000);
-    } else if (typeof obj[k] === 'object') {
-      sanitize(obj[k]);
-    }
-  }
-  return obj;
-}
-app.use((req, _res, next) => { sanitize(req.body); sanitize(req.query); next(); });
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(cors({ origin: '*' }));
+app.use(express.json({ limit: '10mb' }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -220,16 +136,6 @@ async function initDB() {
         message TEXT,
         sent_at TIMESTAMP DEFAULT NOW()
       );
-
-      CREATE TABLE IF NOT EXISTS doctor_day_status (
-        id SERIAL PRIMARY KEY,
-        doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
-        status_date DATE NOT NULL,
-        available BOOLEAN NOT NULL DEFAULT true,
-        note VARCHAR(300),
-        updated_at TIMESTAMP DEFAULT NOW(),
-        UNIQUE(doctor_id, status_date)
-      );
     `);
 
     // seed doctors
@@ -297,7 +203,7 @@ app.get('/api/health', async (_,res) => {
 });
 
 // ── Auth ────────────────────────────────────────────────
-app.post('/api/auth/login', authLimiter, async (req,res) => {
+app.post('/api/auth/login', async (req,res) => {
   const { email, password } = req.body;
   if (!email||!password) return res.status(400).json({ error:'أدخل اسم المستخدم وكلمة المرور' });
   try {
@@ -336,25 +242,13 @@ app.get('/api/public/slots', async (req,res) => {
   try {
     const dr = (await pool.query('SELECT * FROM doctors WHERE id=$1',[doctor_id])).rows[0];
     if (!dr) return res.status(404).json({ error:'الطبيب غير موجود' });
-
-    // Check doctor's manual day status override
-    const dayStatusRow = await pool.query(
-      'SELECT available, note FROM doctor_day_status WHERE doctor_id=$1 AND status_date=$2',
-      [doctor_id, date]
-    );
-    const doctorUnavailable = dayStatusRow.rowCount > 0 && !dayStatusRow.rows[0].available;
-    const unavailableNote   = doctorUnavailable ? (dayStatusRow.rows[0].note || 'الطبيب غير متوفر') : null;
-
-    // Check weekly schedule
     const dayOfWeek = new Date(date).getDay();
     const dayRow = await pool.query(
       'SELECT * FROM doctor_available_days WHERE doctor_id=$1 AND day_of_week=$2',
       [doctor_id, dayOfWeek]
     );
-    // If no weekly schedule AND no manual override allowing it → truly no slots
-    if (!dayRow.rowCount && !doctorUnavailable) return res.json({ unavailable:true, doctorUnavailable:false, slots:[] });
-
-    const sched = dayRow.rows[0] || { start_time: dr.start_time||'09:00', end_time: dr.end_time||'18:00' };
+    if (!dayRow.rowCount) return res.json({ unavailable:true, slots:[] });
+    const sched = dayRow.rows[0];
     const booked = await pool.query(
       `SELECT TO_CHAR(appointment_time,'HH24:MI') as t FROM appointments
        WHERE doctor_id=$1 AND appointment_date=$2 AND status!='cancelled'`,
@@ -372,8 +266,7 @@ app.get('/api/public/slots', async (req,res) => {
       slots.push({ time:`${h}:${m}`, available:!bookedTimes.includes(`${h}:${m}`) });
       cur+=dr.slot_duration||30;
     }
-    // Return slots regardless — but flag doctorUnavailable so frontend can warn
-    res.json({ unavailable:false, doctorUnavailable, unavailableNote, slots });
+    res.json({ unavailable:false, slots });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -457,38 +350,6 @@ app.put('/api/doctors/:id/schedule', auth(['admin','doctor']), async (req,res) =
     );
   }
   res.json({ success:true });
-});
-
-// ── Doctor Day Status (availability toggle per date) ─────
-// GET: doctor fetches their own status for a date range (current month)
-app.get('/api/doctors/:id/day-status', auth(['admin','doctor','receptionist']), async (req,res) => {
-  const docId = +req.params.id;
-  const { from, to } = req.query;
-  if (!from || !to) return res.status(400).json({ error:'from و to مطلوبان' });
-  const { rows } = await pool.query(
-    'SELECT status_date, available, note FROM doctor_day_status WHERE doctor_id=$1 AND status_date BETWEEN $2 AND $3 ORDER BY status_date',
-    [docId, from, to]
-  );
-  res.json(rows);
-});
-
-// PUT: doctor sets their availability for a specific date
-app.put('/api/doctors/:id/day-status', auth(['admin','doctor']), async (req,res) => {
-  const docId = +req.params.id;
-  if (req.user.role === 'doctor' && req.user.doctor_id !== docId)
-    return res.status(403).json({ error:'يمكنك تعديل جدولك فقط' });
-  const { status_date, available, note } = req.body;
-  if (!status_date || available === undefined)
-    return res.status(400).json({ error:'status_date و available مطلوبان' });
-  const { rows } = await pool.query(
-    `INSERT INTO doctor_day_status (doctor_id, status_date, available, note, updated_at)
-     VALUES ($1,$2,$3,$4,NOW())
-     ON CONFLICT (doctor_id, status_date)
-     DO UPDATE SET available=EXCLUDED.available, note=EXCLUDED.note, updated_at=NOW()
-     RETURNING *`,
-    [docId, status_date, available, note||null]
-  );
-  res.json(rows[0]);
 });
 
 // ── Doctor Profile (stats) ───────────────────────────────
@@ -635,21 +496,13 @@ app.get('/api/slots', auth(), async (req,res) => {
   if (!doctor_id||!date) return res.status(400).json({ error:'doctor_id و date مطلوبان' });
   const dr = (await pool.query('SELECT * FROM doctors WHERE id=$1',[doctor_id])).rows[0];
   if (!dr) return res.status(404).json({ error:'الطبيب غير موجود' });
-
-  const dayStatusRow = await pool.query(
-    'SELECT available, note FROM doctor_day_status WHERE doctor_id=$1 AND status_date=$2',
-    [doctor_id, date]
-  );
-  const doctorUnavailable = dayStatusRow.rowCount > 0 && !dayStatusRow.rows[0].available;
-  const unavailableNote   = doctorUnavailable ? (dayStatusRow.rows[0].note || 'الطبيب غير متوفر') : null;
-
   const dayOfWeek = new Date(date).getDay();
   const dayRow = await pool.query(
     'SELECT * FROM doctor_available_days WHERE doctor_id=$1 AND day_of_week=$2',
     [doctor_id, dayOfWeek]
   );
-  if (!dayRow.rowCount && !doctorUnavailable) return res.json({ unavailable:true, doctorUnavailable:false, slots:[] });
-  const sched = dayRow.rows[0] || { start_time: dr.start_time||'09:00', end_time: dr.end_time||'18:00' };
+  if (!dayRow.rowCount) return res.json({ unavailable:true, slots:[] });
+  const sched = dayRow.rows[0];
   const booked = await pool.query(
     `SELECT TO_CHAR(appointment_time,'HH24:MI') as t FROM appointments
      WHERE doctor_id=$1 AND appointment_date=$2 AND status!='cancelled'`,
@@ -667,7 +520,7 @@ app.get('/api/slots', auth(), async (req,res) => {
     slots.push({ time:`${h}:${m}`, available:!bookedTimes.includes(`${h}:${m}`) });
     cur+=dr.slot_duration||30;
   }
-  res.json({ unavailable:false, doctorUnavailable, unavailableNote, slots });
+  res.json({ unavailable:false, slots });
 });
 
 // ── Patient Cases ─────────────────────────────────────────

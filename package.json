@@ -1,6 +1,6 @@
 {
   "name": "rawasi-clinic",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "🦷 رواسي لطب الأسنان — نظام إدارة العيادة",
   "main": "server.js",
   "scripts": {
