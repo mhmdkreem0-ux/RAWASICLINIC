@@ -1095,6 +1095,14 @@ function enterApp() {
     document.getElementById('nav-reports').style.display = 'none';
     document.getElementById('nav-my-profile').style.display = 'flex';
   }
+  // Admin can also access availability calendar
+  if (USER.role === 'admin') {
+    document.getElementById('nav-my-profile').style.display = 'flex';
+    // Change label for admin
+    const navEl = document.getElementById('nav-my-profile');
+    const span = navEl.querySelector('span:last-child');
+    if (span) span.textContent = 'تقويم الأطباء';
+  }
   if (USER.role !== 'admin') {
     document.getElementById('btn-add-doctor').style.display = 'none';
     document.getElementById('nav-admin-section') && (document.getElementById('nav-admin-section').style.display = USER.role === 'receptionist' ? 'none' : '');
@@ -1663,21 +1671,7 @@ function calClickDay(date) {
 const DAYS_AR_FULL = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 let currentDocId = null;
 
-async function loadMyProfile() {
-  const docId = USER.doctor_id;
-  if (!docId) return;
-  currentDocId = docId;
-  try {
-    const data = await api('/doctors/' + docId + '/profile');
-    if (!data) return;
-    document.getElementById('myp-title').textContent = data.name;
-    document.getElementById('myp-total').textContent = data.stats.total_appointments;
-    document.getElementById('myp-done').textContent = data.stats.completed_appointments;
-    document.getElementById('myp-cases').textContent = data.stats.total_cases;
-    document.getElementById('myp-patients').textContent = data.stats.total_patients;
-    renderScheduleGrid(data.schedule);
-  } catch(e) { toast('❌ ' + e.message); }
-}
+// loadMyProfile defined below
 
 function renderScheduleGrid(schedule) {
   const activeDays = schedule.map(s => s.day_of_week);
@@ -2156,9 +2150,44 @@ const DAYS_AR_SHORT = ['أحد','اثن','ثلا','أرب','خمي','جمع','س
 const MONTHS_AR2 = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 
 async function loadMyProfile() {
+  // Doctor sees their own; admin sees dropdown to pick any doctor
+  if (USER.role === 'admin') {
+    await loadMyProfileForDoc(null); // show doctor picker
+    return;
+  }
   const docId = USER.doctor_id;
+  if (!docId) {
+    toast('❌ حسابك غير مرتبط بطبيب — تواصل مع المدير');
+    return;
+  }
+  await loadMyProfileForDoc(docId);
+}
+
+async function loadMyProfileForDoc(docId) {
+  // If admin and no docId, show picker
+  if (!docId && USER.role === 'admin') {
+    document.getElementById('myp-title').textContent = 'إدارة التقويم';
+    // Build doctor selector if not exists
+    if (!document.getElementById('av-doc-select')) {
+      const sel = document.createElement('div');
+      sel.style = 'margin-bottom:16px';
+      sel.innerHTML = '<label style="font-size:13px;font-weight:600;color:var(--mu);display:block;margin-bottom:6px">اختر الطبيب</label>' +
+        '<select id="av-doc-select" onchange="loadMyProfileForDoc(+this.value||null)" style="padding:10px 14px;border-radius:8px;border:1.5px solid var(--br);font-size:14px;font-family:Tajawal,sans-serif;width:100%;max-width:300px">' +
+        '<option value="">— اختر —</option>' +
+        DOCTORS.map(d => '<option value="' + d.id + '">' + d.name + '</option>').join('') +
+        '</select>';
+      const card = document.querySelector('#pg-my-profile .card');
+      if (card) card.insertBefore(sel, card.firstChild);
+    }
+    return;
+  }
   if (!docId) return;
   currentDocId = docId;
+
+  // Update dropdown value if admin
+  const sel = document.getElementById('av-doc-select');
+  if (sel) sel.value = docId;
+
   try {
     const data = await api('/doctors/' + docId + '/profile');
     if (!data) return;
@@ -2169,10 +2198,7 @@ async function loadMyProfile() {
     document.getElementById('myp-patients').textContent = data.stats.total_patients;
     renderScheduleGrid(data.schedule);
 
-    // Store scheduled weekdays
     avWeekDays = data.schedule.map(s => s.day_of_week);
-
-    // Init availability calendar
     const now = new Date();
     avCalYear = now.getFullYear(); avCalMonth = now.getMonth();
     await loadAvExceptions(docId);
@@ -2198,69 +2224,72 @@ function avCalNext() {
 }
 
 function renderAvCal() {
-  document.getElementById('av-cal-label').textContent = MONTHS_AR2[avCalMonth] + ' ' + avCalYear;
+  const label = document.getElementById('av-cal-label');
+  if (label) label.textContent = MONTHS_AR2[avCalMonth] + ' ' + avCalYear;
 
-  // Heads
   const heads = document.getElementById('av-cal-heads');
+  if (!heads) return;
   heads.innerHTML = DAYS_AR_SHORT.map(d => '<div class="cal-day-head">' + d + '</div>').join('');
 
-  const firstDay   = new Date(avCalYear, avCalMonth, 1).getDay();
-  const daysInMonth= new Date(avCalYear, avCalMonth+1, 0).getDate();
-  const daysInPrev = new Date(avCalYear, avCalMonth, 0).getDate();
-  const today      = new Date();
-  const todayStr   = today.toISOString().split('T')[0];
+  const firstDay    = new Date(avCalYear, avCalMonth, 1).getDay();
+  const daysInMonth = new Date(avCalYear, avCalMonth+1, 0).getDate();
+  const daysInPrev  = new Date(avCalYear, avCalMonth, 0).getDate();
+  const todayStr    = new Date().toISOString().split('T')[0];
 
   const body = document.getElementById('av-cal-body');
-  let cells = '';
+  if (!body) return;
 
-  // Previous month filler
+  // Build cells array then join for performance
+  const cellsArr = [];
+
   for (let i = 0; i < firstDay; i++) {
-    const d = daysInPrev - firstDay + i + 1;
-    cells += '<div class="cal-day other-month"><div class="cal-dn">' + d + '</div></div>';
+    cellsArr.push('<div class="cal-day other-month"><div class="cal-dn">' + (daysInPrev - firstDay + i + 1) + '</div></div>');
   }
 
   for (let d = 1; d <= daysInMonth; d++) {
-    const dateStr = avCalYear + '-' +
-      String(avCalMonth+1).padStart(2,'0') + '-' +
-      String(d).padStart(2,'0');
-    const isToday   = dateStr === todayStr;
-    const isPast    = dateStr < todayStr;
-    const dayOfWeek = new Date(dateStr).getDay();
-    const inSchedule = avWeekDays.includes(dayOfWeek);
-    const exc       = avExceptions[dateStr];
+    const mm      = String(avCalMonth+1).padStart(2,'0');
+    const dd      = String(d).padStart(2,'0');
+    const dateStr = avCalYear + '-' + mm + '-' + dd;
+    const isToday = dateStr === todayStr;
+    const isPast  = dateStr < todayStr;
+    const dow     = new Date(avCalYear, avCalMonth, d).getDay();
+    const inSched = avWeekDays.includes(dow);
+    const exc     = avExceptions[dateStr];
 
-    let bg = '', border = '', label = '', tooltip = '';
-
+    let bg, border, badge;
     if (exc) {
       if (exc.is_available) {
-        bg = '#dbeafe'; border = '2px solid #93c5fd';
-        label = '<div style="font-size:9px;color:#1e40af;margin-top:2px;text-align:center">متوفر ✓</div>';
-        tooltip = exc.reason || 'متوفر (استثناء)';
+        bg='#dbeafe'; border='2px solid #93c5fd';
+        badge='<div style="font-size:9px;color:#1e40af;margin-top:3px;text-align:center;line-height:1.2">متوفر<br/>✓</div>';
       } else {
-        bg = '#fee2e2'; border = '2px solid #fca5a5';
-        label = '<div style="font-size:9px;color:#991b1b;margin-top:2px;text-align:center">غائب ✕</div>';
-        tooltip = exc.reason || 'غير متوفر (استثناء)';
+        bg='#fee2e2'; border='2px solid #fca5a5';
+        badge='<div style="font-size:9px;color:#991b1b;margin-top:3px;text-align:center;line-height:1.2">' + (exc.reason?exc.reason.slice(0,8):'غائب') + '<br/>✕</div>';
       }
-    } else if (inSchedule) {
-      bg = '#d1fae5'; border = '1px solid #6ee7b7';
-      label = '';
-      tooltip = 'يوم دوام عادي';
+    } else if (inSched) {
+      bg='#d1fae5'; border='1px solid #6ee7b7'; badge='';
     } else {
-      bg = 'var(--bg)'; border = '1px solid var(--br)';
-      tooltip = 'خارج جدول الدوام';
+      bg='var(--bg)'; border='1px solid var(--br)'; badge='';
     }
 
-    const isToday2 = isToday ? 'border-color:var(--p)!important;' : '';
-    const cursor   = isPast ? 'cursor:not-allowed;opacity:.5;' : 'cursor:pointer;';
+    const todaySty  = isToday ? 'box-shadow:0 0 0 2px var(--p);' : '';
+    const pastSty   = isPast  ? 'opacity:.45;cursor:default;' : 'cursor:pointer;';
+    // Use data-date attribute — no inline string escaping issues
+    const clickAttr = isPast  ? '' : ' data-date="' + dateStr + '"';
 
-    cells += '<div style="min-height:64px;border-radius:8px;padding:5px;background:' + bg + ';border:' + border + ';' + cursor + isToday2 + 'transition:all .15s"' +
-      (isPast ? '' : ' onclick="avToggleDay(\'' + dateStr + '\')"') +
-      ' title="' + tooltip + '">' +
-      '<div style="font-size:12px;font-weight:' + (isToday ? '800' : '600') + ';color:' + (isToday ? 'var(--p)' : 'var(--mu)') + '">' + d + '</div>' +
-      label + '</div>';
+    cellsArr.push(
+      '<div class="av-day-cell" style="min-height:60px;border-radius:8px;padding:5px;background:' + bg + ';border:' + border + ';' + pastSty + todaySty + 'transition:all .15s;user-select:none"' +
+      clickAttr + '>' +
+      '<div style="font-size:12px;font-weight:' + (isToday?'800':'600') + ';color:' + (isToday?'var(--p)':'var(--mu)') + '">' + d + '</div>' +
+      badge + '</div>'
+    );
   }
 
-  body.innerHTML = cells;
+  body.innerHTML = cellsArr.join('');
+
+  // Attach click events using event delegation — no inline onclick escaping
+  body.querySelectorAll('.av-day-cell[data-date]').forEach(el => {
+    el.addEventListener('click', () => avToggleDay(el.getAttribute('data-date')));
+  });
 }
 
 async function avToggleDay(dateStr) {
@@ -2292,9 +2321,9 @@ async function avToggleDay(dateStr) {
     remove = true;
   }
 
-  // Ask for reason when marking unavailable
+  // Ask for reason when marking unavailable  
   if (!remove && newIsAvailable === false) {
-    reason = prompt('سبب الغياب (اختياري):', '') || '';
+    reason = prompt('سبب الغياب (اختياري، مثال: إجازة، مرض):', '') || '';
   }
 
   try {
