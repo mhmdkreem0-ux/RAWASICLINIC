@@ -100,7 +100,7 @@ body{font-family:'Tajawal',sans-serif;color:var(--tx);background:var(--bg);direc
 .main{margin-right:var(--sidebar);flex:1;padding:28px 32px;min-height:100vh;}
 
 /* ── Page Header ── */
-.pg-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;}
+.page{display:none}.page.on{display:block}.pg-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;}
 .pg-title{font-size:24px;font-weight:800;color:var(--pdk);}
 .pg-sub{font-size:13px;color:var(--mu);margin-top:3px;}
 
@@ -281,11 +281,11 @@ tr:hover td{background:var(--pl);}
     <div class="login-err" id="login-err"></div>
     <div class="fg">
       <label>البريد الإلكتروني</label>
-      <input type="email" id="inp-email" placeholder="admin@rawasi.iq" value="admin@rawasi.iq"/>
+      <input type="email" id="inp-email" placeholder="أدخل البريد الإلكتروني"/>
     </div>
     <div class="fg">
       <label>كلمة المرور</label>
-      <input type="password" id="inp-pass" placeholder="••••••••" value="admin123" onkeydown="if(event.key==='Enter')doLogin()"/>
+      <input type="password" id="inp-pass" placeholder="أدخل كلمة المرور" onkeydown="if(event.key==='Enter')doLogin()"/>
     </div>
     <button class="btn-login" onclick="doLogin()">تسجيل الدخول</button>
   </div>
