@@ -330,7 +330,7 @@ tr:hover td{background:var(--pl);}
       <div class="bk-card" id="bk-step1">
         <h3>👨‍⚕️ اختر الطبيب</h3>
         <div class="bk-doctors" id="bk-doctors-grid">
-          <div style="padding:24px;text-align:center;color:var(--mu);grid-column:1/-1">جاري التحميل...</div>
+          <div style="padding:24px;text-align:center;color:rgba(255,255,255,.7);grid-column:1/-1;font-size:14px">⏳ جاري تحميل الأطباء...</div>
         </div>
       </div>
 
@@ -991,7 +991,15 @@ tr:hover td{background:var(--pl);}
 // ════════════════════════════════════════
 //  CONFIG
 // ════════════════════════════════════════
-const API = window.location.hostname === 'localhost' ? 'http://localhost:3001/api' : window.location.origin + '/api';
+// API base — works on localhost, Vercel, and any custom domain
+function getAPI() {
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return 'http://localhost:3001/api';
+  }
+  // On Vercel / production: same origin
+  return window.location.origin + '/api';
+}
+const API = getAPI();
 let TOKEN = localStorage.getItem('rawasi_token') || '';
 let USER = JSON.parse(localStorage.getItem('rawasi_user') || 'null');
 let DOCTORS = [];
@@ -1472,7 +1480,7 @@ function renderDoctorGrid(docs) {
   grid.innerHTML = docs.map((d,i) => `
     <div class="card" style="padding:22px;text-align:center;position:relative">
       ${isAdmin ? `<button onclick="deleteDoctor(${d.id},'${d.name}')" style="position:absolute;top:10px;left:10px;background:#fff0f0;border:1px solid #f5c6cb;color:#c0392b;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-family:'Tajawal',sans-serif">🗑️ حذف</button>` : ''}
-      <div style="width:60px;height:60px;border-radius:14px;background:${d.color||colors[i%4]};display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff;margin:0 auto 10px">${d.name.split('.')[1]?.trim()[0]||'د'}</div>
+      <div style="width:60px;height:60px;border-radius:14px;background:${d.color||colors[i%4]};display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff;margin:0 auto 10px">${(d.name.includes('.')?d.name.split('.')[1].trim()[0]:d.name.trim()[0])||'د'}</div>
       <div style="font-size:14px;font-weight:700">${d.name}</div>
       <div style="font-size:12px;color:var(--mu);margin-top:4px">${d.specialty||'—'}</div>
       <div style="margin-top:10px;font-size:12px;color:var(--mu)">${d.start_time?.substring(0,5)||'09:00'} — ${d.end_time?.substring(0,5)||'18:00'}</div>
@@ -1955,18 +1963,22 @@ async function bkInit() {
   try {
     const docs = await fetch(API + '/public/doctors').then(r=>r.json());
     // Doctor cards for booking
-    document.getElementById('bk-doctors-grid').innerHTML = docs.map(d => `
-      <div class="bk-doc-card" id="bkd-${d.id}" onclick="bkSelectDoc(${d.id},'${d.name}')">
-        <div class="bk-doc-av" style="background:${d.color||'#3C2A98'}">${d.name.split('.')[1]?.trim()[0]||'د'}</div>
-        <div class="bk-doc-name">${d.name}</div>
-        <div class="bk-doc-spec">${d.specialty||'—'}</div>
-        <div style="font-size:10px;color:var(--mu);margin-top:4px">${d.start_time?.substring(0,5)||'09:00'} – ${d.end_time?.substring(0,5)||'18:00'}</div>
-      </div>`).join('');
+    // Store doctors data globally for safe access
+    window._bkDoctors = docs;
+    document.getElementById('bk-doctors-grid').innerHTML = docs.map(d => {
+      const initial = (d.name.includes('.') ? d.name.split('.')[1].trim()[0] : d.name.trim()[0]) || 'د';
+      return '<div class="bk-doc-card" id="bkd-' + d.id + '" data-docid="' + d.id + '" onclick="bkSelectDoc(' + d.id + ')">' +
+        '<div class="bk-doc-av" style="background:' + (d.color||'#3C2A98') + '">' + initial + '</div>' +
+        '<div class="bk-doc-name">' + d.name + '</div>' +
+        '<div class="bk-doc-spec">' + (d.specialty||'—') + '</div>' +
+        '<div style="font-size:10px;color:var(--mu);margin-top:4px">' + (d.start_time||'09:00').substring(0,5) + ' – ' + (d.end_time||'18:00').substring(0,5) + '</div>' +
+        '</div>';
+    }).join('');
 
     // Doctors info section
     document.getElementById('bk-docs-list').innerHTML = docs.map(d => `
       <div style="display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid var(--br)">
-        <div style="width:44px;height:44px;border-radius:12px;background:${d.color||'#3C2A98'};display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff;flex-shrink:0">${d.name.split('.')[1]?.trim()[0]||'د'}</div>
+        <div style="width:44px;height:44px;border-radius:12px;background:${d.color||'#3C2A98'};display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff;flex-shrink:0">${(d.name.includes('.')?d.name.split('.')[1].trim()[0]:d.name.trim()[0])||'د'}</div>
         <div>
           <div style="font-size:14px;font-weight:700;color:var(--pdk)">${d.name}</div>
           <div style="font-size:12px;color:var(--mu)">${d.specialty||'—'}</div>
@@ -1977,10 +1989,15 @@ async function bkInit() {
     const today = new Date().toISOString().split('T')[0];
     document.getElementById('bk-date').min = today;
     document.getElementById('bk-date').value = today;
-  } catch(e) { console.warn('bkInit', e); }
+  } catch(e) {
+    console.warn('bkInit error:', e);
+    // Show fallback message so user knows what happened
+    const grid = document.getElementById('bk-doctors-grid');
+    if (grid) grid.innerHTML = '<div style="grid-column:1/-1;padding:20px;text-align:center;color:#c0392b;font-size:14px">⚠️ تعذّر تحميل الأطباء — تأكد من الاتصال بالإنترنت أو حاول مرة أخرى<br/><button onclick="bkInit()" style="margin-top:12px;padding:8px 20px;background:var(--p);color:#fff;border:none;border-radius:8px;cursor:pointer;font-family:Tajawal,sans-serif;font-size:13px">إعادة المحاولة</button></div>';
+  }
 }
 
-function bkSelectDoc(id, name) {
+function bkSelectDoc(id) {
   bkSelectedDoc = id;
   document.querySelectorAll('.bk-doc-card').forEach(c => c.classList.remove('sel'));
   document.getElementById('bkd-' + id)?.classList.add('sel');
@@ -2026,8 +2043,8 @@ function bkSelectSlot(el, time) {
   document.querySelectorAll('.bk-slot').forEach(b => b.classList.remove('sel'));
   el.classList.add('sel');
   bkSelectedSlot = time;
-  const doc = document.getElementById('bkd-' + bkSelectedDoc);
-  const docName = doc?.querySelector('.bk-doc-name')?.textContent || '';
+  const _bkDoc = (window._bkDoctors||[]).find(d=>d.id==bkSelectedDoc);
+  const docName = _bkDoc ? _bkDoc.name : (document.getElementById('bkd-'+bkSelectedDoc)?.querySelector('.bk-doc-name')?.textContent||'');
   const date = document.getElementById('bk-date').value;
   document.getElementById('bk-sum-doc').textContent = docName;
   document.getElementById('bk-sum-date').textContent = new Date(date).toLocaleDateString('ar-IQ',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
@@ -2057,14 +2074,19 @@ async function bkSubmit() {
       })
     }).then(r => r.json());
     if (result.error) return bkToast('❌ ' + result.error);
-    bkWaUrl = result.waUrl;
-    const doc = document.getElementById('bkd-' + bkSelectedDoc);
-    const docName = doc?.querySelector('.bk-doc-name')?.textContent || '';
+    bkWaUrl = result.waUrl || '';
+    const _bkDocSub = (window._bkDoctors||[]).find(d=>d.id==bkSelectedDoc);
+    const docName2 = _bkDocSub ? _bkDocSub.name : '';
+    const apptDate = result.appointment?.appointment_date || document.getElementById('bk-date').value;
     document.getElementById('bk-success-details').innerHTML =
-      `👨‍⚕️ ${docName}<br/>📅 ${result.appointment.appointment_date}<br/>⏰ ${bkSelectedSlot}<br/>🩺 ${service}`;
+      '👨‍⚕️ ' + docName2 + '<br/>📅 ' + apptDate + '<br/>⏰ ' + bkSelectedSlot + '<br/>🩺 ' + service +
+      (result.docUnavailable ? '<br/><br/><span style="color:#92400e;font-size:12px">⚠️ سيتواصل معك موظف الاستقبال لتأكيد الموعد</span>' : '');
     document.getElementById('bk-form-section').style.display = 'none';
     document.getElementById('bk-success-section').style.display = '';
-  } catch(e) { bkToast('❌ خطأ في الاتصال بالسيرفر'); }
+  } catch(e) {
+    console.error('bkSubmit error:', e);
+    bkToast('❌ خطأ في الاتصال — تأكد من الإنترنت وأعد المحاولة');
+  }
 }
 
 function bkOpenWA() { if (bkWaUrl) window.open(bkWaUrl, '_blank'); }
@@ -2077,9 +2099,10 @@ function bkReset() {
   document.getElementById('bk-summary').style.display = 'none';
   document.getElementById('bk-form-section').style.display = '';
   document.getElementById('bk-success-section').style.display = 'none';
-  ['bk-name','bk-phone','bk-age','bk-notes'].forEach(id => document.getElementById(id).value = '');
-  document.getElementById('bk-service').value = '';
-  document.getElementById('bk-gender').value = '';
+  ['bk-name','bk-phone','bk-age','bk-notes'].forEach(id => { const el = document.getElementById(id); if(el) el.value=''; });
+  const sv = document.getElementById('bk-service'); if(sv) sv.value='';
+  const gv = document.getElementById('bk-gender'); if(gv) gv.value='';
+  const warn = document.getElementById('bk-unavail-warn'); if(warn) warn.remove();
 }
 
 function bkToast(msg) { toast(msg); }
