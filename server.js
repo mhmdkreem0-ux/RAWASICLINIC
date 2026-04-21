@@ -14,9 +14,100 @@ require('dotenv').config();
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '10mb' }));
+// ══════════════════════════════════════════════════════════
+//  SECURITY — أعلى مستوى حماية
+// ══════════════════════════════════════════════════════════
+
+// Helmet — كامل الحماية
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc:  ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      styleSrc:   ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://fonts.gstatic.com"],
+      fontSrc:    ["'self'", "https://fonts.gstatic.com"],
+      imgSrc:     ["'self'", "data:", "https://res.cloudinary.com"],
+      connectSrc: ["'self'", "https://api.cloudinary.com"],
+      frameSrc:   ["'none'"],
+      objectSrc:  ["'none'"],
+      upgradeInsecureRequests: [],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+  noSniff: true,
+  xssFilter: true,
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  frameguard: { action: 'deny' },
+  permittedCrossDomainPolicies: { permittedPolicies: 'none' },
+}));
+
+// CORS — محدود بالدومينات المسموح بها
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  : ['*'];
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      cb(null, true);
+    } else {
+      cb(new Error('CORS: الدومين غير مسموح'));
+    }
+  },
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  credentials: true,
+}));
+
+// Rate Limiter بسيط بدون مكتبة خارجية
+const rateLimitMap = new Map();
+function rateLimit(windowMs, max) {
+  return (req, res, next) => {
+    const key = req.ip + ':' + req.path;
+    const now = Date.now();
+    const entry = rateLimitMap.get(key) || { count: 0, start: now };
+    if (now - entry.start > windowMs) { entry.count = 0; entry.start = now; }
+    entry.count++;
+    rateLimitMap.set(key, entry);
+    // تنظيف دوري
+    if (rateLimitMap.size > 10000) {
+      for (const [k,v] of rateLimitMap) { if (now - v.start > windowMs) rateLimitMap.delete(k); }
+    }
+    if (entry.count > max) {
+      return res.status(429).json({ error: 'طلبات كثيرة جداً، حاول لاحقاً' });
+    }
+    next();
+  };
+}
+
+// تطبيق rate limit على تسجيل الدخول (5 محاولات كل دقيقة)
+const loginLimiter    = rateLimit(60 * 1000, 5);
+// تطبيق rate limit على الحجز العام (10 طلبات كل دقيقة)
+const publicLimiter   = rateLimit(60 * 1000, 10);
+// عام على كل الـ API
+const globalLimiter   = rateLimit(60 * 1000, 120);
+
+app.use('/api', globalLimiter);
+app.use('/api/auth/login', loginLimiter);
+app.use('/api/public', publicLimiter);
+
+// منع parameter pollution
+app.use((req, _res, next) => {
+  for (const key in req.query) {
+    if (Array.isArray(req.query[key])) req.query[key] = req.query[key][0];
+  }
+  next();
+});
+
+app.use(express.json({ limit: '5mb' }));
+
+// إضافة security headers إضافية
+app.use((_req, res, next) => {
+  res.setHeader('X-Powered-By', '');            // إخفاء هوية السيرفر
+  res.removeHeader('X-Powered-By');
+  res.setHeader('Cache-Control', 'no-store');   // منع التخزين المؤقت للبيانات الحساسة
+  next();
+});
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -136,6 +227,16 @@ async function initDB() {
         message TEXT,
         sent_at TIMESTAMP DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS doctor_day_overrides (
+        id SERIAL PRIMARY KEY,
+        doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
+        override_date DATE NOT NULL,
+        is_available BOOLEAN NOT NULL DEFAULT true,
+        note TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(doctor_id, override_date)
+      );
     `);
 
     // seed doctors
@@ -179,15 +280,19 @@ async function initDB() {
 // ══════════════════════════════════════════════════════════
 //  AUTH MIDDLEWARE
 // ══════════════════════════════════════════════════════════
+const tokenBlacklist = new Set();
+
 function auth(roles = []) {
   return (req, res, next) => {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'غير مصرح' });
+    if (tokenBlacklist.has(token)) return res.status(401).json({ error: 'انتهت الجلسة' });
     try {
       const p = jwt.verify(token, process.env.JWT_SECRET || 'rawasi-secret-2025');
       if (roles.length && !roles.includes(p.role))
         return res.status(403).json({ error: 'ليس لديك صلاحية' });
       req.user = p;
+      req._token = token;
       next();
     } catch { res.status(401).json({ error: 'انتهت الجلسة' }); }
   };
@@ -218,14 +323,20 @@ app.post('/api/auth/login', async (req,res) => {
     if (!ok) return res.status(401).json({ error:'كلمة المرور خطأ' });
     const token = jwt.sign(
       { id:user.id, name:user.name, email:user.email, role:user.role, doctor_id:user.doctor_id },
-      process.env.JWT_SECRET||'rawasi-secret-2025',
-      { expiresIn:'12h' }
+      process.env.JWT_SECRET||'rawasi-secret-key-2025-CHANGE-ME',
+      { expiresIn:'8h', issuer:'rawasi-clinic' }
     );
     res.json({ token, user:{ id:user.id, name:user.name, role:user.role, doctor_id:user.doctor_id } });
   } catch(e) { console.error(e); res.status(500).json({ error:'خطأ في السيرفر' }); }
 });
 
 app.get('/api/auth/me', auth(), (req,res) => res.json(req.user));
+
+// تسجيل الخروج — إضافة التوكن للقائمة السوداء
+app.post('/api/auth/logout', auth(), (req, res) => {
+  if (req._token) tokenBlacklist.add(req._token);
+  res.json({ success: true });
+});
 
 // ── PUBLIC: Doctors list (for booking page) ─────────────
 app.get('/api/public/doctors', async (_,res) => {
@@ -242,12 +353,22 @@ app.get('/api/public/slots', async (req,res) => {
   try {
     const dr = (await pool.query('SELECT * FROM doctors WHERE id=$1',[doctor_id])).rows[0];
     if (!dr) return res.status(404).json({ error:'الطبيب غير موجود' });
+    
+    // التحقق من override اليوم
+    const override = await pool.query(
+      'SELECT * FROM doctor_day_overrides WHERE doctor_id=$1 AND override_date=$2',
+      [doctor_id, date]
+    );
+    if (override.rowCount && !override.rows[0].is_available) {
+      return res.json({ unavailable: true, slots: [], reason: 'الطبيب غير متوفر في هذا اليوم' });
+    }
+    
     const dayOfWeek = new Date(date).getDay();
     const dayRow = await pool.query(
       'SELECT * FROM doctor_available_days WHERE doctor_id=$1 AND day_of_week=$2',
       [doctor_id, dayOfWeek]
     );
-    if (!dayRow.rowCount) return res.json({ unavailable:true, slots:[] });
+    if (!dayRow.rowCount) return res.json({ unavailable:true, slots: [], reason: 'الطبيب لا يعمل في هذا اليوم من الأسبوع' });
     const sched = dayRow.rows[0];
     const booked = await pool.query(
       `SELECT TO_CHAR(appointment_time,'HH24:MI') as t FROM appointments
@@ -285,20 +406,27 @@ app.post('/api/public/book', async (req,res) => {
       );
       pt = ins.rows[0];
     }
-    // Check conflict
+    // التحقق من تضارب المواعيد (وليس من التوفر - المريض يمكنه الحجز حتى لو غير متوفر)
     const conflict = await pool.query(
       `SELECT id FROM appointments WHERE doctor_id=$1 AND appointment_date=$2
        AND appointment_time=$3 AND status!='cancelled'`,
       [doctor_id,appointment_date,appointment_time]
     );
     if (conflict.rowCount) return res.status(409).json({ error:'هذا الوقت محجوز مسبقاً، يرجى اختيار وقت آخر' });
+    
+    // التحقق من أن الطبيب غير متوفر (لكن نسمح بالحجز)
+    const override = (await pool.query(
+      'SELECT is_available FROM doctor_day_overrides WHERE doctor_id=$1 AND override_date=$2',
+      [doctor_id, appointment_date]
+    )).rows[0];
+    const doctorUnavailable = override && !override.is_available;
     const dr = (await pool.query('SELECT name FROM doctors WHERE id=$1',[doctor_id])).rows[0];
     const { rows } = await pool.query(
       `INSERT INTO appointments (patient_id,doctor_id,service,appointment_date,appointment_time,notes,status)
        VALUES ($1,$2,$3,$4,$5,$6,'pending') RETURNING *`,
       [pt.id,doctor_id,service,appointment_date,appointment_time,notes||null]
     );
-    const msg = `🦷 *رواسي لطب الأسنان*\n\nعزيزي ${pt.name}،\nتم استلام طلب حجزك:\n\n📅 ${appointment_date}\n⏰ ${appointment_time}\n👨‍⚕️ ${dr?.name||'—'}\n🩺 ${service}\n\nسيتم التأكيد قريباً.\n📍 بغداد - الحارثية - مقابل مول بغداد\n📞 07747881005`;
+    const msg = `🦷 *رواسي لطب الأسنان*\n\nعزيزي ${pt.name}،\nتم استلام طلب حجزك:\n\n📅 ${appointment_date}\n⏰ ${appointment_time}\n👨‍⚕️ ${dr?.name||'—'}\n🩺 ${service}\n\n${doctorUnavailable ? '⚠️ ملاحظة: الطبيب قد يكون غير متوفر في هذا اليوم.\n' : ''}سيتم التأكيد قريباً من موظف الاستقبال.\n📍 بغداد - الحارثية - مقابل مول بغداد\n📞 07747881005`;
     const waPhone = pt.phone.startsWith('0') ? '964'+pt.phone.slice(1) : pt.phone;
     res.json({ success:true, appointment:rows[0], waUrl:`https://wa.me/${waPhone}?text=${encodeURIComponent(msg)}` });
   } catch(e) { console.error(e); res.status(500).json({ error:'خطأ في السيرفر' }); }
@@ -376,6 +504,51 @@ app.get('/api/doctors/:id/profile', auth(['admin','doctor']), async (req,res) =>
     },
     schedule: schedule.rows,
   });
+});
+
+// ── Doctor Day Overrides (تحديد التوفر اليدوي للأيام) ────
+// جلب overrides لطبيب في شهر معين
+app.get('/api/doctors/:id/overrides', auth(), async (req, res) => {
+  const { month } = req.query; // format: YYYY-MM
+  let q = 'SELECT * FROM doctor_day_overrides WHERE doctor_id=$1';
+  const params = [req.params.id];
+  if (month) {
+    q += ' AND TO_CHAR(override_date,'YYYY-MM')=$2';
+    params.push(month);
+  }
+  q += ' ORDER BY override_date';
+  const { rows } = await pool.query(q, params);
+  res.json(rows);
+});
+
+// حفظ override ليوم معين من قبل الطبيب أو الأدمن
+app.put('/api/doctors/:id/overrides', auth(['admin','doctor']), async (req, res) => {
+  const docId = +req.params.id;
+  if (req.user.role === 'doctor' && req.user.doctor_id !== docId)
+    return res.status(403).json({ error: 'يمكنك تعديل جدولك فقط' });
+  const { override_date, is_available, note } = req.body;
+  if (!override_date) return res.status(400).json({ error: 'التاريخ مطلوب' });
+  const { rows } = await pool.query(
+    `INSERT INTO doctor_day_overrides (doctor_id, override_date, is_available, note)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (doctor_id, override_date)
+     DO UPDATE SET is_available=$3, note=$4, created_at=NOW()
+     RETURNING *`,
+    [docId, override_date, is_available ?? true, note || null]
+  );
+  res.json(rows[0]);
+});
+
+// حذف override (إرجاع اليوم لحالته الطبيعية)
+app.delete('/api/doctors/:id/overrides/:date', auth(['admin','doctor']), async (req, res) => {
+  const docId = +req.params.id;
+  if (req.user.role === 'doctor' && req.user.doctor_id !== docId)
+    return res.status(403).json({ error: 'يمكنك تعديل جدولك فقط' });
+  await pool.query(
+    'DELETE FROM doctor_day_overrides WHERE doctor_id=$1 AND override_date=$2',
+    [docId, req.params.date]
+  );
+  res.json({ success: true });
 });
 
 // ── Patients ─────────────────────────────────────────────
@@ -470,7 +643,7 @@ app.post('/api/appointments', auth(['admin','receptionist']), async (req,res) =>
   const dr = (await pool.query('SELECT name FROM doctors WHERE id=$1',[doctor_id])).rows[0];
   const msg = `🦷 *رواسي لطب الأسنان*\n\nعزيزي ${pt.name}،\nتم تأكيد موعدك:\n\n📅 ${appointment_date}\n⏰ ${appointment_time}\n👨‍⚕️ ${dr?.name||'—'}\n🩺 ${service}\n\n📍 بغداد - الحارثية - مقابل مول بغداد\n📞 07747881005`;
   const waPhone = pt.phone.startsWith('0') ? '964'+pt.phone.slice(1) : pt.phone;
-  res.json({ ...rows[0], waUrl:`https://wa.me/${waPhone}?text=${encodeURIComponent(msg)}` });
+  res.json(rows[0]);  // بدون تبليغ تلقائي - موظف الاستقبال سيتولى التبليغ
 });
 
 app.patch('/api/appointments/:id', auth(['admin','receptionist']), async (req,res) => {

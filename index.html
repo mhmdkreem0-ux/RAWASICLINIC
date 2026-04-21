@@ -401,11 +401,15 @@ tr:hover td{background:var(--pl);}
     <div id="bk-success-section" style="display:none">
       <div class="bk-success">
         <div class="ico">🎉</div>
-        <h3>تم إرسال طلب الحجز!</h3>
-        <p>سيتم التواصل معك لتأكيد الموعد</p>
+        <h3>تم استلام طلب الحجز!</h3>
+        <p>✅ سيتم التواصل معك من موظفة الاستقبال لتأكيد الموعد</p>
         <div id="bk-success-details" style="margin:16px 0;font-size:13px;color:#065f46"></div>
-        <button class="btn btn-primary" id="bk-wa-btn" style="margin:12px auto;display:block" onclick="bkOpenWA()">📱 تواصل معنا عبر واتساب</button>
-        <button class="btn btn-ghost" onclick="bkReset()" style="margin:4px auto;display:block">حجز موعد آخر</button>
+        <div style="background:#e7f3ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px;margin:12px 0;font-size:12px;color:#1e40af">
+          📍 <strong>العنوان:</strong> بغداد - الحارثية - مقابل مول بغداد<br/>
+          📞 <strong>الهاتف:</strong> 07747881005<br/>
+          ⏰ <strong>أوقات العمل:</strong> السبت–الخميس: 9 صباحاً – 6 مساءً
+        </div>
+        <button class="btn btn-ghost" onclick="bkReset()" style="margin:8px auto;display:block">حجز موعد آخر</button>
       </div>
     </div>
 
@@ -696,6 +700,28 @@ tr:hover td{background:var(--pl);}
         <div class="card-title" style="margin-bottom:14px">📅 جدول الدوام الأسبوعي</div>
         <div id="schedule-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px"></div>
         <div style="margin-top:14px"><button class="btn btn-primary" onclick="saveSchedule()">💾 حفظ الجدول</button></div>
+      </div>
+      <div class="card" style="padding:22px;margin-top:18px">
+        <div class="card-title" style="margin-bottom:14px">📍 تحديد التوفر اليومي</div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+          <div class="fg" style="margin-bottom:0;flex:1;min-width:180px">
+            <label>اختر التاريخ</label>
+            <input type="date" id="override-date" style="width:100%;padding:10px 14px;border-radius:8px;border:1.5px solid var(--br);font-family:'Tajawal',sans-serif;direction:rtl"/>
+          </div>
+          <div class="fg" style="margin-bottom:0">
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--mu);margin-bottom:5px">التوفر</label>
+            <select id="override-status" style="padding:10px 14px;border-radius:8px;border:1.5px solid var(--br);font-family:'Tajawal',sans-serif;cursor:pointer;font-weight:600">
+              <option value="true">✅ متوفر</option>
+              <option value="false">❌ غير متوفر</option>
+            </select>
+          </div>
+          <div class="fg" style="margin-bottom:0">
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--mu);margin-bottom:5px">ملاحظة (اختياري)</label>
+            <input type="text" id="override-note" placeholder="مثال: إجازة / حالة طارئة" style="padding:10px 14px;border-radius:8px;border:1.5px solid var(--br);font-family:'Tajawal',sans-serif"/>
+          </div>
+          <button class="btn btn-primary" onclick="saveDateOverride()">💾 حفظ</button>
+        </div>
+        <div id="overrides-list" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--br)"></div>
       </div>
     </div>
 
@@ -1642,6 +1668,7 @@ async function loadMyProfile() {
     document.getElementById('myp-cases').textContent = data.stats.total_cases;
     document.getElementById('myp-patients').textContent = data.stats.total_patients;
     renderScheduleGrid(data.schedule);
+    loadDayOverrides();  // تحميل تحديثات التوفر اليومية
   } catch(e) { toast('❌ ' + e.message); }
 }
 
@@ -1681,6 +1708,64 @@ async function saveSchedule() {
   try {
     await api('/doctors/' + currentDocId + '/schedule', { method:'PUT', body:{ days } });
     toast('✅ تم حفظ الجدول');
+  } catch(e) { toast('❌ ' + e.message); }
+}
+
+// ════════════════════════════════════════
+//  DOCTOR DAY OVERRIDES (تحديد التوفر اليومي)
+// ════════════════════════════════════════
+async function loadDayOverrides() {
+  if (!currentDocId) return;
+  try {
+    const today = new Date();
+    const month = today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2,'0');
+    const overrides = await api('/doctors/' + currentDocId + '/overrides?month=' + month);
+    const list = document.getElementById('overrides-list');
+    if (!overrides || !overrides.length) {
+      list.innerHTML = '<div style="font-size:13px;color:var(--mu);text-align:center">لا توجد تحديثات توفر لهذا الشهر</div>';
+      return;
+    }
+    list.innerHTML = overrides.map(o => {
+      const date = new Date(o.override_date).toLocaleDateString('ar-IQ', {weekday:'short',year:'numeric',month:'short',day:'numeric'});
+      const status = o.is_available ? '✅ متوفر' : '❌ غير متوفر';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--br)">
+        <div>
+          <div style="font-weight:600;font-size:13px">${date}</div>
+          ${o.note ? `<div style="font-size:11px;color:var(--mu)">${o.note}</div>` : ''}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span style="font-size:13px;font-weight:600;color:${o.is_available?'#0a7c4e':'#991b1b'}">${status}</span>
+          <button class="btn btn-danger btn-sm" onclick="deleteDayOverride('${o.override_date}')">✕</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { toast('❌ ' + e.message); }
+}
+
+async function saveDateOverride() {
+  if (!currentDocId) return;
+  const date = document.getElementById('override-date').value;
+  const status = document.getElementById('override-status').value === 'true';
+  const note = document.getElementById('override-note').value || '';
+  if (!date) return toast('❗ اختر تاريخاً');
+  try {
+    await api('/doctors/' + currentDocId + '/overrides', {
+      method: 'PUT',
+      body: { override_date: date, is_available: status, note }
+    });
+    toast('✅ تم حفظ تحديث التوفر');
+    document.getElementById('override-date').value = '';
+    document.getElementById('override-note').value = '';
+    loadDayOverrides();
+  } catch(e) { toast('❌ ' + e.message); }
+}
+
+async function deleteDayOverride(date) {
+  if (!currentDocId || !confirm('هل تريد حذف هذا التحديث؟')) return;
+  try {
+    await api('/doctors/' + currentDocId + '/overrides/' + date, { method: 'DELETE' });
+    toast('✅ تم الحذف');
+    loadDayOverrides();
   } catch(e) { toast('❌ ' + e.message); }
 }
 
@@ -1973,8 +2058,16 @@ async function bkLoadSlots() {
   bkSelectedSlot = '';
   try {
     const data = await fetch(`${API}/public/slots?doctor_id=${bkSelectedDoc}&date=${date}`).then(r=>r.json());
-    if (data.unavailable || !data.slots?.length) {
-      wrap.innerHTML = '<span style="font-size:13px;color:#c0392b">الطبيب غير متاح في هذا اليوم</span>';
+    if (data.unavailable && !data.slots?.length) {
+      // الطبيب غير متوفر لكن نسمح بالحجز (سيتم اتصالهم موظف الاستقبال)
+      wrap.innerHTML = `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px;margin-bottom:8px;font-size:13px;color:#856404">
+        ⚠️ ${data.reason || 'الطبيب قد يكون غير متوفر في هذا اليوم'}<br/>
+        يمكنك المتابعة مع موظف الاستقبال
+      </div>`;
+      return;
+    }
+    if (!data.slots?.length) {
+      wrap.innerHTML = '<span style="font-size:13px;color:var(--mu)">لا توجد أوقات متاحة</span>';
       return;
     }
     wrap.innerHTML = data.slots.map(s => `
@@ -2018,7 +2111,7 @@ async function bkSubmit() {
       })
     }).then(r => r.json());
     if (result.error) return bkToast('❌ ' + result.error);
-    bkWaUrl = result.waUrl;
+    // لا نفتح واتساب تلقائياً — موظف الاستقبال سيتولى التواصل
     const doc = document.getElementById('bkd-' + bkSelectedDoc);
     const docName = doc?.querySelector('.bk-doc-name')?.textContent || '';
     document.getElementById('bk-success-details').innerHTML =
