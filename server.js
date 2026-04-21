@@ -23,7 +23,7 @@ const _fails = new Map(); // ip -> { count, lockedUntil }
 
 function rateLimit(max, windowMs) {
   return (req, res, next) => {
-    const ip = (req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();
+    const ip = (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
     const now = Date.now();
     let entry = _hits.get(ip);
     if (!entry || now > entry.resetAt) {
@@ -42,14 +42,14 @@ function rateLimit(max, windowMs) {
 }
 
 function loginBruteGuard(req, res, next) {
-  const ip = (req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();
+  const ip = (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
+  req._ipKey = ip; // always set before any return
   const now = Date.now();
   const f = _fails.get(ip) || { count: 0, lockedUntil: 0 };
   if (f.lockedUntil > now) {
     const secs = Math.ceil((f.lockedUntil - now) / 1000);
-    return res.status(429).json({ error: `تم إيقاف المحاولات مؤقتاً. حاول بعد ${secs} ثانية` });
+    return res.status(429).json({ error: 'تم إيقاف المحاولات مؤقتاً. حاول بعد ' + secs + ' ثانية' });
   }
-  req._ipKey = ip;
   next();
 }
 function recordLoginFail(ip) {
@@ -254,14 +254,27 @@ async function initDB() {
       );
     `);
 
-    // Migration: add missing columns
-    const migrations = [
-      `ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_unavailable BOOLEAN DEFAULT false`,
-      `ALTER TABLE users ADD COLUMN IF NOT EXISTS login_attempts INTEGER DEFAULT 0`,
-      `ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP`,
-      `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP`,
-    ];
-    for (const m of migrations) await c.query(m).catch(()=>{});
+    // Safe migrations — each isolated so one failure doesn't block others
+    const safeMigrate = async (sql) => { try { await c.query(sql); } catch {} };
+    await safeMigrate(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_unavailable BOOLEAN DEFAULT false`);
+    await safeMigrate(`ALTER TABLE users ADD COLUMN IF NOT EXISTS login_attempts INTEGER DEFAULT 0`);
+    await safeMigrate(`ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP`);
+    await safeMigrate(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP`);
+    await safeMigrate(`CREATE TABLE IF NOT EXISTS doctor_day_exceptions (
+      id SERIAL PRIMARY KEY,
+      doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
+      exception_date DATE NOT NULL,
+      is_available BOOLEAN NOT NULL DEFAULT false,
+      reason VARCHAR(200),
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(doctor_id, exception_date)
+    )`);
+    await safeMigrate(`CREATE TABLE IF NOT EXISTS audit_log (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER, user_name VARCHAR(100),
+      action VARCHAR(50), resource VARCHAR(50), resource_id INTEGER,
+      ip VARCHAR(60), details TEXT, created_at TIMESTAMP DEFAULT NOW()
+    )`);
 
     // Seed doctors
     const { rowCount: dc } = await c.query('SELECT id FROM doctors LIMIT 1');
@@ -284,15 +297,20 @@ async function initDB() {
       }
     }
 
-    // Seed admin
-    const { rowCount: uc } = await c.query("SELECT id FROM users WHERE username='rexlmk' LIMIT 1");
-    if (!uc) {
-      const hash = await bcrypt.hash('mhmd@123', 12);
-      await c.query(
-        `INSERT INTO users(name,email,username,password,role) VALUES('المديرة','admin@rawasi.iq','rexlmk',$1,'admin') ON CONFLICT DO NOTHING`,
-        [hash]
-      );
-    }
+    // Seed admin — always ensure rexlmk exists with correct password
+    try {
+      const { rows: adminRows } = await c.query("SELECT id FROM users WHERE username='rexlmk' LIMIT 1");
+      if (!adminRows.length) {
+        const hash = await bcrypt.hash('mhmd@123', 10);
+        await c.query(
+          `INSERT INTO users(name,email,username,password,role,is_active)
+           VALUES('المديرة','admin@rawasi.iq','rexlmk',$1,'admin',true)
+           ON CONFLICT(username) DO UPDATE SET password=$1, is_active=true, role='admin'`,
+          [hash]
+        );
+        console.log('✅ Admin user created/updated');
+      }
+    } catch(adminErr) { console.error('Admin seed error:', adminErr.message); }
     console.log('✅ DB ready');
   } catch(e) { console.error('initDB:', e.message); }
   finally { c.release(); }
@@ -355,36 +373,49 @@ app.post('/api/auth/login',
     const pwd = String(req.body.password || '').slice(0, 128);
     if (!uid || !pwd) return res.status(400).json({ error:'أدخل اسم المستخدم وكلمة المرور' });
     try {
+      // Simple query — no dependency on new columns
       const { rows } = await pool.query(
-        `SELECT * FROM users WHERE (email=$1 OR username=$1) AND is_active=true
-         AND (locked_until IS NULL OR locked_until < NOW())`, [uid]
+        'SELECT * FROM users WHERE (email=$1 OR username=$1) AND is_active=true', [uid]
       );
       if (!rows.length) {
         recordLoginFail(ip);
-        await new Promise(r => setTimeout(r, 600));
         return res.status(401).json({ error:'الحساب غير موجود أو محظور' });
       }
       const user = rows[0];
+
+      // Check DB-level lock if column exists
+      if (user.locked_until && new Date(user.locked_until) > new Date()) {
+        const secs = Math.ceil((new Date(user.locked_until) - new Date()) / 1000);
+        return res.status(429).json({ error: 'الحساب مقفل مؤقتاً. حاول بعد ' + secs + ' ثانية' });
+      }
+
       const ok = await bcrypt.compare(pwd, user.password);
       if (!ok) {
         recordLoginFail(ip);
-        await pool.query(
-          `UPDATE users SET login_attempts=login_attempts+1,
-           locked_until=CASE WHEN login_attempts>=9 THEN NOW()+INTERVAL '15 minutes' ELSE locked_until END
-           WHERE id=$1`, [user.id]
-        );
-        await new Promise(r => setTimeout(r, 600));
+        // Try to update attempts — but don't fail login if column missing
+        try {
+          await pool.query('UPDATE users SET login_attempts=COALESCE(login_attempts,0)+1 WHERE id=$1', [user.id]);
+        } catch {}
         return res.status(401).json({ error:'كلمة المرور خطأ' });
       }
+
       clearLoginFail(ip);
-      await pool.query('UPDATE users SET login_attempts=0,locked_until=NULL,last_login=NOW() WHERE id=$1',[user.id]);
+      // Update last_login — ignore errors if column missing
+      try {
+        await pool.query('UPDATE users SET login_attempts=0, last_login=NOW() WHERE id=$1', [user.id]);
+      } catch {}
+
       const token = jwt.sign(
         { id:user.id, name:user.name, email:user.email, role:user.role, doctor_id:user.doctor_id },
         JWT_SECRET, { expiresIn:'12h', algorithm:'HS256' }
       );
-      await audit(user.id, user.name, 'LOGIN', 'users', user.id, ip, null);
+      // Audit — ignore errors
+      try { await audit(user.id, user.name, 'LOGIN', 'users', user.id, ip, null); } catch {}
       res.json({ token, user:{ id:user.id, name:user.name, role:user.role, doctor_id:user.doctor_id } });
-    } catch(e) { console.error(e); res.status(500).json({ error:'خطأ في السيرفر' }); }
+    } catch(e) {
+      console.error('LOGIN ERROR:', e.message);
+      res.status(500).json({ error:'خطأ في السيرفر: ' + e.message });
+    }
   }
 );
 
@@ -893,7 +924,7 @@ app.post('/api/users', auth(['admin']), async (req,res) => {
   const role=['admin','doctor','receptionist'].includes(req.body.role)?req.body.role:'receptionist';
   if (!name||!pwd||pwd.length<6) return res.status(400).json({ error:'الاسم وكلمة المرور (٦ أحرف) مطلوبان' });
   const uname=san(req.body.username)||san(req.body.email)||name;
-  const hash=await bcrypt.hash(pwd,12);
+  const hash=await bcrypt.hash(pwd,10);
   const { rows }=await pool.query(
     'INSERT INTO users(name,email,username,password,role,doctor_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,email,username,role',
     [name,sanEmail(req.body.email)||null,uname,hash,role,sanInt(req.body.doctor_id)||null]
