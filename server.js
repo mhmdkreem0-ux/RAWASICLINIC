@@ -110,18 +110,14 @@ app.use(helmet({
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
 }));
 
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+// CORS — open for all origins (Vercel + custom domains)
 app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    if (!ALLOWED_ORIGINS.length) return cb(null, true);
-    if (ALLOWED_ORIGINS.some(o => origin.startsWith(o.trim()))) return cb(null, true);
-    cb(new Error('CORS: origin not allowed'));
-  },
+  origin: true,
   methods: ['GET','POST','PATCH','PUT','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
   credentials: true,
 }));
+app.options('*', cors());
 
 app.use(express.json({ limit: '2mb' }));
 app.use(rateLimit(200, 60_000));
@@ -312,8 +308,12 @@ async function initDB() {
       }
     } catch(adminErr) { console.error('Admin seed error:', adminErr.message); }
     console.log('✅ DB ready');
-  } catch(e) { console.error('initDB:', e.message); }
-  finally { c.release(); }
+  } catch(e) {
+    console.error('initDB ERROR:', e.message);
+    // Don't crash — server still starts, DB errors show in logs
+  } finally {
+    try { c.release(); } catch {}
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -363,61 +363,46 @@ app.get('/api/health', async (_,res) => {
 });
 
 // ── LOGIN ────────────────────────────────────────────────
-app.post('/api/auth/login',
-  rateLimit(10, 60_000),
-  loginBruteGuard,
-  async (req,res) => {
-    const ip  = req._ipKey;
-    // Keep @ and . for email/username — only strip truly dangerous chars
-    const uid = req.body.email ? String(req.body.email).replace(/[<>"`;]/g,'').trim().slice(0,150) : null;
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const uid = String(req.body.email || '').trim().slice(0, 150);
     const pwd = String(req.body.password || '').slice(0, 128);
-    if (!uid || !pwd) return res.status(400).json({ error:'أدخل اسم المستخدم وكلمة المرور' });
-    try {
-      // Simple query — no dependency on new columns
-      const { rows } = await pool.query(
-        'SELECT * FROM users WHERE (email=$1 OR username=$1) AND is_active=true', [uid]
-      );
-      if (!rows.length) {
-        recordLoginFail(ip);
-        return res.status(401).json({ error:'الحساب غير موجود أو محظور' });
-      }
-      const user = rows[0];
 
-      // Check DB-level lock if column exists
-      if (user.locked_until && new Date(user.locked_until) > new Date()) {
-        const secs = Math.ceil((new Date(user.locked_until) - new Date()) / 1000);
-        return res.status(429).json({ error: 'الحساب مقفل مؤقتاً. حاول بعد ' + secs + ' ثانية' });
-      }
-
-      const ok = await bcrypt.compare(pwd, user.password);
-      if (!ok) {
-        recordLoginFail(ip);
-        // Try to update attempts — but don't fail login if column missing
-        try {
-          await pool.query('UPDATE users SET login_attempts=COALESCE(login_attempts,0)+1 WHERE id=$1', [user.id]);
-        } catch {}
-        return res.status(401).json({ error:'كلمة المرور خطأ' });
-      }
-
-      clearLoginFail(ip);
-      // Update last_login — ignore errors if column missing
-      try {
-        await pool.query('UPDATE users SET login_attempts=0, last_login=NOW() WHERE id=$1', [user.id]);
-      } catch {}
-
-      const token = jwt.sign(
-        { id:user.id, name:user.name, email:user.email, role:user.role, doctor_id:user.doctor_id },
-        JWT_SECRET, { expiresIn:'12h', algorithm:'HS256' }
-      );
-      // Audit — ignore errors
-      try { await audit(user.id, user.name, 'LOGIN', 'users', user.id, ip, null); } catch {}
-      res.json({ token, user:{ id:user.id, name:user.name, role:user.role, doctor_id:user.doctor_id } });
-    } catch(e) {
-      console.error('LOGIN ERROR:', e.message);
-      res.status(500).json({ error:'خطأ في السيرفر: ' + e.message });
+    if (!uid || !pwd) {
+      return res.status(400).json({ error: 'أدخل اسم المستخدم وكلمة المرور' });
     }
+
+    const { rows } = await pool.query(
+      'SELECT * FROM users WHERE (email=$1 OR username=$1) AND is_active=true LIMIT 1',
+      [uid]
+    );
+
+    if (!rows.length) {
+      return res.status(401).json({ error: 'الحساب غير موجود' });
+    }
+
+    const user = rows[0];
+    const ok = await bcrypt.compare(pwd, user.password);
+
+    if (!ok) {
+      return res.status(401).json({ error: 'كلمة المرور خطأ' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, name: user.name, email: user.email, role: user.role, doctor_id: user.doctor_id },
+      JWT_SECRET,
+      { expiresIn: '12h' }
+    );
+
+    res.json({
+      token,
+      user: { id: user.id, name: user.name, role: user.role, doctor_id: user.doctor_id }
+    });
+  } catch (e) {
+    console.error('LOGIN ERROR:', e.message, e.stack);
+    res.status(500).json({ error: 'خطأ في السيرفر: ' + e.message });
   }
-);
+});
 
 app.get('/api/auth/me', auth(), (req,res) => res.json(req.user));
 
@@ -962,6 +947,6 @@ app.use((_,res) => res.status(404).json({ error:'المسار غير موجود'
 app.use((err,_,res,__) => { console.error(err); res.status(500).json({ error:'خطأ داخلي' }); });
 
 // ── Boot ──────────────────────────────────────────────────
-initDB();
+initDB().catch(e => console.error('initDB failed:', e.message));
 if (process.env.VERCEL!=='1') app.listen(PORT,()=>console.log(`🦷 Rawasi API :${PORT}`));
 module.exports = app;
