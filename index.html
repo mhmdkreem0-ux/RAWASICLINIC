@@ -692,10 +692,36 @@ tr:hover td{background:var(--pl);}
         <div class="stat blue"><div class="stat-ico">📋</div><div class="stat-n" id="myp-cases">—</div><div class="stat-l">الحالات</div></div>
         <div class="stat amber"><div class="stat-ico">👥</div><div class="stat-n" id="myp-patients">—</div><div class="stat-l">المرضى</div></div>
       </div>
-      <div class="card" style="padding:22px">
+      <!-- Weekly schedule -->
+      <div class="card" style="padding:22px;margin-bottom:18px">
         <div class="card-title" style="margin-bottom:14px">📅 جدول الدوام الأسبوعي</div>
         <div id="schedule-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px"></div>
-        <div style="margin-top:14px"><button class="btn btn-primary" onclick="saveSchedule()">💾 حفظ الجدول</button></div>
+        <div style="margin-top:14px"><button class="btn btn-primary" onclick="saveSchedule()">💾 حفظ الجدول الأسبوعي</button></div>
+      </div>
+      <!-- Daily availability calendar -->
+      <div class="card" style="padding:22px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">
+          <div>
+            <div class="card-title">🗓️ تحديد التوفر اليومي</div>
+            <div style="font-size:12px;color:var(--mu);margin-top:3px">اضغط على أي يوم لتحديد توفرك أو غيابك في تلك اليوم تحديداً</div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="avCalPrev()">→</button>
+            <button class="btn btn-ghost btn-sm" id="av-cal-label" style="min-width:120px;justify-content:center">—</button>
+            <button class="btn btn-ghost btn-sm" onclick="avCalNext()">←</button>
+          </div>
+        </div>
+        <!-- Legend -->
+        <div style="display:flex;gap:14px;margin-bottom:14px;flex-wrap:wrap;font-size:12px;color:var(--mu)">
+          <div style="display:flex;align-items:center;gap:5px"><div style="width:14px;height:14px;background:#d1fae5;border:1px solid #6ee7b7;border-radius:3px"></div> متوفر (عادي)</div>
+          <div style="display:flex;align-items:center;gap:5px"><div style="width:14px;height:14px;background:#fee2e2;border:1px solid #fca5a5;border-radius:3px"></div> غير متوفر (استثناء)</div>
+          <div style="display:flex;align-items:center;gap:5px"><div style="width:14px;height:14px;background:#dbeafe;border:1px solid #93c5fd;border-radius:3px"></div> متوفر (استثناء)</div>
+          <div style="display:flex;align-items:center;gap:5px"><div style="width:14px;height:14px;background:var(--bg);border:1px solid var(--br);border-radius:3px;opacity:.5"></div> خارج جدول الدوام</div>
+        </div>
+        <div class="cal-grid" id="av-cal-heads"></div>
+        <div style="height:6px"></div>
+        <div class="cal-grid" id="av-cal-body" style="gap:4px"></div>
+        <div id="av-cal-loading" style="text-align:center;padding:20px;color:var(--mu);font-size:13px;display:none">جاري التحميل...</div>
       </div>
     </div>
 
@@ -1971,16 +1997,29 @@ async function bkLoadSlots() {
   const wrap = document.getElementById('bk-slots-wrap');
   wrap.innerHTML = '<span style="font-size:13px;color:var(--mu)">جاري التحميل...</span>';
   bkSelectedSlot = '';
+  const prevWarn = document.getElementById('bk-unavail-warn');
+  if (prevWarn) prevWarn.remove();
   try {
-    const data = await fetch(`${API}/public/slots?doctor_id=${bkSelectedDoc}&date=${date}`).then(r=>r.json());
-    if (data.unavailable || !data.slots?.length) {
-      wrap.innerHTML = '<span style="font-size:13px;color:#c0392b">الطبيب غير متاح في هذا اليوم</span>';
-      return;
+    const data = await fetch(API + '/public/slots?doctor_id=' + bkSelectedDoc + '&date=' + date).then(r=>r.json());
+    if (data.docUnavailable) {
+      const warning = document.createElement('div');
+      warning.id = 'bk-unavail-warn';
+      warning.style.cssText = 'background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:12px 14px;margin-bottom:12px;font-size:13px;color:#92400e;display:flex;align-items:flex-start;gap:8px';
+      warning.innerHTML = '<span style="font-size:16px;flex-shrink:0">⚠️</span><div><strong>الطبيب قد لا يكون متاحاً في هذا اليوم</strong>' + (data.reason ? '<br/><span style="color:#b45309">' + data.reason + '</span>' : '') + '<br/>يمكنك إكمال الحجز وسيتواصل معك موظف الاستقبال لتأكيد الموعد.</div>';
+      wrap.parentNode.insertBefore(warning, wrap);
     }
-    wrap.innerHTML = data.slots.map(s => `
-      <button class="bk-slot" ${!s.available?'disabled':''} style="${!s.available?'opacity:.35;cursor:not-allowed;background:var(--bg)':''}"
-        onclick="bkSelectSlot(this,'${s.time}')">${s.time}</button>`).join('');
-  } catch { wrap.innerHTML = '<span style="font-size:13px;color:var(--mu)">خطأ في التحميل</span>'; }
+    let slots = data.slots || [];
+    if (!slots.length) {
+      for (let h = 9; h < 18; h++) {
+        slots.push({ time: String(h).padStart(2,'0') + ':00', available: true });
+        slots.push({ time: String(h).padStart(2,'0') + ':30', available: true });
+      }
+    }
+    wrap.innerHTML = slots.map(s =>
+      '<button class="bk-slot"' + (!s.available ? ' disabled style="opacity:.35;cursor:not-allowed;background:var(--bg)"' : '') +
+      ' onclick="bkSelectSlot(this,\'' + s.time + '\')">' + s.time + '</button>'
+    ).join('');
+  } catch(e) { wrap.innerHTML = '<span style="font-size:13px;color:var(--mu)">خطأ في التحميل</span>'; }
 }
 
 function bkSelectSlot(el, time) {
@@ -2080,6 +2119,176 @@ if (TOKEN && USER) {
   enterApp();
 } else {
   document.getElementById('hamburger').style.display = 'none';
+}
+
+// ════════════════════════════════════════
+//  DOCTOR AVAILABILITY CALENDAR
+//  (shown in my-profile page)
+// ════════════════════════════════════════
+let avCalYear, avCalMonth;
+let avExceptions = {}; // date -> {is_available, reason}
+let avWeekDays  = []; // [0,1,2,3,4,5] = scheduled days of week
+
+const DAYS_AR_SHORT = ['أحد','اثن','ثلا','أرب','خمي','جمع','سبت'];
+const MONTHS_AR2 = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+
+async function loadMyProfile() {
+  const docId = USER.doctor_id;
+  if (!docId) return;
+  currentDocId = docId;
+  try {
+    const data = await api('/doctors/' + docId + '/profile');
+    if (!data) return;
+    document.getElementById('myp-title').textContent = data.name;
+    document.getElementById('myp-total').textContent  = data.stats.total_appointments;
+    document.getElementById('myp-done').textContent   = data.stats.completed_appointments;
+    document.getElementById('myp-cases').textContent  = data.stats.total_cases;
+    document.getElementById('myp-patients').textContent = data.stats.total_patients;
+    renderScheduleGrid(data.schedule);
+
+    // Store scheduled weekdays
+    avWeekDays = data.schedule.map(s => s.day_of_week);
+
+    // Init availability calendar
+    const now = new Date();
+    avCalYear = now.getFullYear(); avCalMonth = now.getMonth();
+    await loadAvExceptions(docId);
+    renderAvCal();
+  } catch(e) { toast('❌ ' + e.message); }
+}
+
+async function loadAvExceptions(docId) {
+  try {
+    const rows = await api('/doctors/' + (docId || currentDocId) + '/exceptions');
+    avExceptions = {};
+    (rows||[]).forEach(r => { avExceptions[r.exception_date.substring(0,10)] = r; });
+  } catch {}
+}
+
+function avCalPrev() {
+  if (avCalMonth-- === 0) { avCalMonth = 11; avCalYear--; }
+  renderAvCal();
+}
+function avCalNext() {
+  if (avCalMonth++ === 11) { avCalMonth = 0; avCalYear++; }
+  renderAvCal();
+}
+
+function renderAvCal() {
+  document.getElementById('av-cal-label').textContent = MONTHS_AR2[avCalMonth] + ' ' + avCalYear;
+
+  // Heads
+  const heads = document.getElementById('av-cal-heads');
+  heads.innerHTML = DAYS_AR_SHORT.map(d => '<div class="cal-day-head">' + d + '</div>').join('');
+
+  const firstDay   = new Date(avCalYear, avCalMonth, 1).getDay();
+  const daysInMonth= new Date(avCalYear, avCalMonth+1, 0).getDate();
+  const daysInPrev = new Date(avCalYear, avCalMonth, 0).getDate();
+  const today      = new Date();
+  const todayStr   = today.toISOString().split('T')[0];
+
+  const body = document.getElementById('av-cal-body');
+  let cells = '';
+
+  // Previous month filler
+  for (let i = 0; i < firstDay; i++) {
+    const d = daysInPrev - firstDay + i + 1;
+    cells += '<div class="cal-day other-month"><div class="cal-dn">' + d + '</div></div>';
+  }
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = avCalYear + '-' +
+      String(avCalMonth+1).padStart(2,'0') + '-' +
+      String(d).padStart(2,'0');
+    const isToday   = dateStr === todayStr;
+    const isPast    = dateStr < todayStr;
+    const dayOfWeek = new Date(dateStr).getDay();
+    const inSchedule = avWeekDays.includes(dayOfWeek);
+    const exc       = avExceptions[dateStr];
+
+    let bg = '', border = '', label = '', tooltip = '';
+
+    if (exc) {
+      if (exc.is_available) {
+        bg = '#dbeafe'; border = '2px solid #93c5fd';
+        label = '<div style="font-size:9px;color:#1e40af;margin-top:2px;text-align:center">متوفر ✓</div>';
+        tooltip = exc.reason || 'متوفر (استثناء)';
+      } else {
+        bg = '#fee2e2'; border = '2px solid #fca5a5';
+        label = '<div style="font-size:9px;color:#991b1b;margin-top:2px;text-align:center">غائب ✕</div>';
+        tooltip = exc.reason || 'غير متوفر (استثناء)';
+      }
+    } else if (inSchedule) {
+      bg = '#d1fae5'; border = '1px solid #6ee7b7';
+      label = '';
+      tooltip = 'يوم دوام عادي';
+    } else {
+      bg = 'var(--bg)'; border = '1px solid var(--br)';
+      tooltip = 'خارج جدول الدوام';
+    }
+
+    const isToday2 = isToday ? 'border-color:var(--p)!important;' : '';
+    const cursor   = isPast ? 'cursor:not-allowed;opacity:.5;' : 'cursor:pointer;';
+
+    cells += '<div style="min-height:64px;border-radius:8px;padding:5px;background:' + bg + ';border:' + border + ';' + cursor + isToday2 + 'transition:all .15s"' +
+      (isPast ? '' : ' onclick="avToggleDay(\'' + dateStr + '\')"') +
+      ' title="' + tooltip + '">' +
+      '<div style="font-size:12px;font-weight:' + (isToday ? '800' : '600') + ';color:' + (isToday ? 'var(--p)' : 'var(--mu)') + '">' + d + '</div>' +
+      label + '</div>';
+  }
+
+  body.innerHTML = cells;
+}
+
+async function avToggleDay(dateStr) {
+  if (!currentDocId) return;
+  const exc = avExceptions[dateStr];
+  const dayOfWeek = new Date(dateStr).getDay();
+  const inSchedule = avWeekDays.includes(dayOfWeek);
+
+  // Cycle: if no exception → mark unavailable
+  //         if unavailable exception → mark available (exception override)
+  //         if available exception → remove exception (back to default)
+  let newIsAvailable, remove = false, reason = null;
+
+  if (!exc) {
+    // No exception yet
+    if (inSchedule) {
+      // Normally scheduled → mark as unavailable
+      newIsAvailable = false;
+      reason = '';
+    } else {
+      // Not scheduled → mark as available (special day)
+      newIsAvailable = true;
+    }
+  } else if (!exc.is_available) {
+    // Was unavailable → flip to available
+    newIsAvailable = true;
+  } else {
+    // Was available exception → remove (back to default)
+    remove = true;
+  }
+
+  // Ask for reason when marking unavailable
+  if (!remove && newIsAvailable === false) {
+    reason = prompt('سبب الغياب (اختياري):', '') || '';
+  }
+
+  try {
+    if (remove) {
+      await api('/doctors/' + currentDocId + '/exceptions/' + dateStr, { method: 'DELETE' });
+      delete avExceptions[dateStr];
+      toast('✅ تمت إزالة الاستثناء');
+    } else {
+      const row = await api('/doctors/' + currentDocId + '/exceptions', {
+        method: 'POST',
+        body: { date: dateStr, is_available: newIsAvailable, reason: reason }
+      });
+      avExceptions[dateStr] = row;
+      toast(newIsAvailable ? '✅ تم تسجيلك متوفراً في هذا اليوم' : '✅ تم تسجيل غيابك في هذا اليوم');
+    }
+    renderAvCal();
+  } catch(e) { toast('❌ ' + e.message); }
 }
 </script>
 </body>
